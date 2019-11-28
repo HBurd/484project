@@ -84,29 +84,3 @@ void deinit_audio(AudioData *jack_data)
 
     jack_client_close(jack_data->client);
 }
-
-void RingBuf::write(sample_t *data, uint32_t length)
-{
-    uint32_t written = 0;
-
-    while (written < length)
-    {
-        uint32_t length_to_write = MIN(length - written, buffer_length - marker);
-        memcpy(buffer + marker, data + written, length_to_write * sizeof(sample_t));
-
-        written += length_to_write;
-        marker += length_to_write;
-        if (marker == buffer_length)
-        {
-            marker = 0;
-        }
-    }
-}
-
-void buffer_add(sample_t *acc, sample_t *operand, uint32_t length)
-{
-    for (uint32_t i = 0; i < length; ++i)
-    {
-        acc[i] += operand[i];
-    }
-}

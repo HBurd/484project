@@ -6,15 +6,6 @@
 
 typedef jack_default_audio_sample_t sample_t;
 
-struct RingBuf
-{
-    uint32_t marker = 0;
-    uint32_t buffer_length = 0;
-    sample_t *buffer = nullptr; 
-
-    void write(sample_t *data, uint32_t length);
-};
-
 struct AudioData
 {
     uint32_t fs;
@@ -36,5 +27,3 @@ struct AudioData
 
 void init_audio(AudioData *audio_data);
 void deinit_audio(AudioData *audio_data);
-
-void buffer_add(sample_t *acc, sample_t *operand, uint32_t length);
