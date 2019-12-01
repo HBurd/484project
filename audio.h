@@ -17,6 +17,8 @@ struct AudioData
     sample_t *right_input_buffer;
     sample_t *left_output_buffer;
     sample_t *right_output_buffer;
+    
+    void (*dsp_callback)(AudioData *);
 
     jack_client_t *client;
     jack_port_t *left_in;

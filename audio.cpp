@@ -2,6 +2,7 @@
 #include "util.h"
 #include <assert.h>
 #include <string.h>
+#include <iostream>
 
 static int jack_process_callback(jack_nframes_t nframes, void *arg)
 {
@@ -76,6 +77,17 @@ void init_audio(AudioData *jack_data)
     assert(!err);
 
     jack_activate(jack_data->client);
+
+    /*
+    // connect to pulseaudio
+    err = jack_connect(jack_data->client, "PulseAudio JACK Sink:front-left", jack_port_name(jack_data->left_in));
+    assert(!err);
+    err = jack_connect(jack_data->client, "PulseAudio JACK Sink:front-right", jack_port_name(jack_data->right_in));
+    err = jack_connect(jack_data->client, jack_port_name(jack_data->left_out), "system:playback_1");
+    assert(!err);
+    err = jack_connect(jack_data->client, jack_port_name(jack_data->right_out), "system:playback_2");
+    assert(!err);
+    */
 }
 
 void deinit_audio(AudioData *jack_data)
