@@ -14,10 +14,6 @@ std::mutex patch_mutex;
 constexpr uint32_t NUM_CHANNELS = 2;
 
 constexpr uint32_t SAMPLE_RATE = 44100;
-constexpr uint32_t DELAY_LINE_LENGTH = 44100;
-
-sample_t left_delay_line[DELAY_LINE_LENGTH];
-sample_t right_delay_line[DELAY_LINE_LENGTH];
 
 uint32_t current_delay_line_length = 44100;
 
@@ -28,7 +24,6 @@ constexpr uint32_t BUFFER_LENGTH = 1024;
 sample_t delay_output_buf[NUM_CHANNELS][BUFFER_LENGTH];
 
 constexpr uint32_t PV_BLOCK_SIZE = 1024;
-constexpr uint32_t PV_INPUT_BUF_LEN = 2 * PV_BLOCK_SIZE;
 uint32_t hop_size = PV_BLOCK_SIZE / 4;
 
 sample_t pv_output_buf[NUM_CHANNELS][BUFFER_LENGTH];
@@ -38,10 +33,10 @@ sample_t hanw[PV_BLOCK_SIZE];
 
 struct Routings
 {
-    sample_t *pv_input[2];
-    sample_t *delay_input[2];
-    sample_t *delay_fb_input[2];
-    sample_t *output[2];
+    sample_t *pv_input[2] = {};
+    sample_t *delay_input[2] = {};
+    sample_t *delay_fb_input[2] = {};
+    sample_t *output[2] = {};
 };
 
 kiss_fft_cfg kiss_fwd_cfg;
@@ -49,7 +44,7 @@ kiss_fft_cfg kiss_bwd_cfg;
 
 static void pv_process(AudioData *audio_data, Routings *routings, float pitch_ratio)
 {
-
+    constexpr uint32_t PV_INPUT_BUF_LEN = 2 * PV_BLOCK_SIZE;
     static sample_t pv_input_buf[NUM_CHANNELS][PV_INPUT_BUF_LEN];
 
     // We have to copy our fft input into a new buffer with imaginary values (dumb)
@@ -76,7 +71,8 @@ static void pv_process(AudioData *audio_data, Routings *routings, float pitch_ra
 
             // Copy remaining partial windows into output buffer (to be overlapped)
             memcpy(pv_output_buf[c], partial_windows[c], BUFFER_LENGTH * sizeof(sample_t));
-            memset(partial_windows[c], 0, PV_BLOCK_SIZE * sizeof(sample_t));
+            memcpy(partial_windows[c], partial_windows[c] + BUFFER_LENGTH, BUFFER_LENGTH * sizeof(sample_t));
+            memset(partial_windows[c] + BUFFER_LENGTH, 0, BUFFER_LENGTH * sizeof(sample_t));
         }
 
         for (uint32_t h = 0; h < PV_BLOCK_SIZE / hop_size; ++h)
@@ -130,9 +126,9 @@ static void pv_process(AudioData *audio_data, Routings *routings, float pitch_ra
                     else if (next_sample_idx == PV_BLOCK_SIZE)
                     {
                         // Lerp towards zero at the end of the block
-                        float han_sampled = lerp(hanw[sample_idx], hanw[next_sample_idx], t);
+                        float han_sampled = lerp(hanw[sample_idx], 0.0f, t);
                         pv_output_buf[c][i + block_start] +=
-                            hanw[sample_idx] * lerp(fft_buf[c][sample_idx].r, 0.0f, t) / PV_BLOCK_SIZE;
+                            han_sampled * lerp(fft_buf[c][sample_idx].r, 0.0f, t) / PV_BLOCK_SIZE;
                     }
                 }
 
@@ -154,13 +150,118 @@ static void pv_process(AudioData *audio_data, Routings *routings, float pitch_ra
                     else if (next_sample_idx == PV_BLOCK_SIZE)
                     {
                         // Lerp towards zero at the end of the block
-                        float han_sampled = lerp(hanw[sample_idx], hanw[next_sample_idx], t);
+                        float han_sampled = lerp(hanw[sample_idx], 0.0f, t);
                         partial_windows[c][i - PV_BLOCK_SIZE + block_start] += 
                             han_sampled * lerp(fft_buf[c][sample_idx].r, 0.0f, t) / PV_BLOCK_SIZE;
                     }
                 }
             }
         }
+    }
+}
+
+static void tape_delay_process(AudioData *audio_data, Routings routings, Patch patch)
+{
+    constexpr uint32_t DELAY_LINE_LENGTH = 44100;
+
+    static sample_t left_delay_line[DELAY_LINE_LENGTH];
+    static sample_t right_delay_line[DELAY_LINE_LENGTH];
+
+    static float last_delay_time = patch.delay_time;
+    static float last_write_head;
+    static float write_head;
+
+    for (uint32_t i = 0; i < BUFFER_LENGTH; ++i)
+    {
+        // Calculate current delay time
+        float current_delay_time;
+        {
+            float t = (float)i / BUFFER_LENGTH;
+            current_delay_time = lerp(last_delay_time, patch.delay_time, t);
+        }
+
+        float write_head_increment = current_delay_line_length / (current_delay_time * SAMPLE_RATE);
+
+        // Determine next FF sample
+        sample_t left_ff_sample;
+        sample_t right_ff_sample;
+        {
+            float read_head = write_head + 1.0f;
+            if (read_head >= DELAY_LINE_LENGTH) read_head -= DELAY_LINE_LENGTH;
+
+            uint32_t sample_idx = (uint32_t)read_head;
+            uint32_t next_sample_idx = wrap(sample_idx + 1, DELAY_LINE_LENGTH);
+            float t = read_head - sample_idx;
+            left_ff_sample = lerp(left_delay_line[sample_idx], left_delay_line[next_sample_idx], t);
+            right_ff_sample = lerp(right_delay_line[sample_idx], right_delay_line[next_sample_idx], t);
+        }
+
+        // write output sample
+        {
+            delay_output_buf[0][i] = left_ff_sample;
+            delay_output_buf[1][i] = right_ff_sample;
+        }
+
+        // write to delay_line
+        // LOSSLESS DELAY COMMENTED OUT
+        /*
+        {
+            uint32_t index_to_write = ceilf(last_write_head);
+            float write_head_unwrapped = last_write_head + write_head_increment;
+            while (index_to_write < write_head_unwrapped)
+            {
+                float t = (index_to_write - last_write_head) / write_head_increment;
+                left_delay_line[wrap(index_to_write, DELAY_LINE_LENGTH)] +=
+                    lerp(0.0f, routings.delay_input[0][i], t);
+                right_delay_line[wrap(index_to_write, DELAY_LINE_LENGTH)] +=
+                    lerp(0.0f, routings.delay_input[1][i], t);
+                ++index_to_write;
+            }
+
+            float next_write_head_unwrapped = write_head_unwrapped + write_head_increment;
+            while (index_to_write < next_write_head_unwrapped)
+            {
+                float t = (index_to_write - write_head_unwrapped) / write_head_increment;
+                left_delay_line[wrap(index_to_write, DELAY_LINE_LENGTH)] =
+                    patch.fb_gain * left_delay_line[wrap(index_to_write, DELAY_LINE_LENGTH)]
+                    + lerp(routings.delay_input[0][i], 0.0f, t);
+                right_delay_line[wrap(index_to_write, DELAY_LINE_LENGTH)] =
+                    patch.fb_gain * right_delay_line[wrap(index_to_write, DELAY_LINE_LENGTH)]
+                    + lerp(routings.delay_input[1][i], 0.0f, t);
+                ++index_to_write;
+            }
+        }
+        */
+        {
+            uint32_t index_to_write = ceilf(last_write_head);
+            float write_head_unwrapped = last_write_head + write_head_increment;
+            while (index_to_write < write_head_unwrapped)
+            {
+                float t = (index_to_write - last_write_head) / write_head_increment;
+                left_delay_line[wrap(index_to_write, DELAY_LINE_LENGTH)] +=
+                    lerp(0.0f, routings.delay_input[0][i] + patch.fb_gain * routings.delay_fb_input[0][i], t);
+                right_delay_line[wrap(index_to_write, DELAY_LINE_LENGTH)] +=
+                    lerp(0.0f, routings.delay_input[1][i] + patch.fb_gain * routings.delay_fb_input[1][i], t);
+                ++index_to_write;
+            }
+
+            float next_write_head_unwrapped = write_head_unwrapped + write_head_increment;
+            while (index_to_write < next_write_head_unwrapped)
+            {
+                float t = (index_to_write - write_head_unwrapped) / write_head_increment;
+                left_delay_line[wrap(index_to_write, DELAY_LINE_LENGTH)] =
+                    lerp(routings.delay_input[0][i] + patch.fb_gain * routings.delay_fb_input[0][i], 0.0f, t);
+                right_delay_line[wrap(index_to_write, DELAY_LINE_LENGTH)] =
+                    lerp(routings.delay_input[1][i] + patch.fb_gain * routings.delay_fb_input[1][i], 0.0f, t);
+                ++index_to_write;
+            }
+        }
+
+        last_write_head = write_head;
+        write_head += write_head_increment;
+        if (write_head >= DELAY_LINE_LENGTH) write_head -= DELAY_LINE_LENGTH;
+
+        last_delay_time = patch.delay_time;
     }
 }
 
@@ -203,10 +304,6 @@ static void process_audio_frame(AudioData *audio_data)
     //last_delay_samples = current_patch.delay_samples;
     
     Routings routings;
-    
-    float write_head = 0.0f;
-    float last_write_head = 0.0f;
-    float last_delay_time = current_patch.delay_time;
 
     while (true)
     {
@@ -250,98 +347,7 @@ static void process_audio_frame(AudioData *audio_data)
                 break;
         }
 
-        for (uint32_t i = 0; i < BUFFER_LENGTH; ++i)
-        {
-            // Calculate current delay time
-            float current_delay_time;
-            {
-                float t = (float)i / BUFFER_LENGTH;
-                current_delay_time = lerp(last_delay_time, patch.delay_time, t);
-            }
-
-            float write_head_increment = current_delay_line_length / (current_delay_time * SAMPLE_RATE);
-
-            // Determine next FF sample
-            sample_t left_ff_sample;
-            sample_t right_ff_sample;
-            {
-                float read_head = write_head + 1.0f;
-                if (read_head >= DELAY_LINE_LENGTH) read_head -= DELAY_LINE_LENGTH;
-
-                uint32_t sample_idx = (uint32_t)read_head;
-                uint32_t next_sample_idx = wrap(sample_idx + 1, DELAY_LINE_LENGTH);
-                float t = read_head - sample_idx;
-                left_ff_sample = lerp(left_delay_line[sample_idx], left_delay_line[next_sample_idx], t);
-                right_ff_sample = lerp(right_delay_line[sample_idx], right_delay_line[next_sample_idx], t);
-            }
-
-            // write output sample
-            {
-                delay_output_buf[0][i] = left_ff_sample;
-                delay_output_buf[1][i] = right_ff_sample;
-            }
-
-            // write to delay_line
-            // LOSSLESS DELAY COMMENTED OUT
-            /*
-            {
-                uint32_t index_to_write = ceilf(last_write_head);
-                float write_head_unwrapped = last_write_head + write_head_increment;
-                while (index_to_write < write_head_unwrapped)
-                {
-                    float t = (index_to_write - last_write_head) / write_head_increment;
-                    left_delay_line[wrap(index_to_write, DELAY_LINE_LENGTH)] +=
-                        lerp(0.0f, routings.delay_input[0][i], t);
-                    right_delay_line[wrap(index_to_write, DELAY_LINE_LENGTH)] +=
-                        lerp(0.0f, routings.delay_input[1][i], t);
-                    ++index_to_write;
-                }
-
-                float next_write_head_unwrapped = write_head_unwrapped + write_head_increment;
-                while (index_to_write < next_write_head_unwrapped)
-                {
-                    float t = (index_to_write - write_head_unwrapped) / write_head_increment;
-                    left_delay_line[wrap(index_to_write, DELAY_LINE_LENGTH)] =
-                        patch.fb_gain * left_delay_line[wrap(index_to_write, DELAY_LINE_LENGTH)]
-                        + lerp(routings.delay_input[0][i], 0.0f, t);
-                    right_delay_line[wrap(index_to_write, DELAY_LINE_LENGTH)] =
-                        patch.fb_gain * right_delay_line[wrap(index_to_write, DELAY_LINE_LENGTH)]
-                        + lerp(routings.delay_input[1][i], 0.0f, t);
-                    ++index_to_write;
-                }
-            }
-            */
-            {
-                uint32_t index_to_write = ceilf(last_write_head);
-                float write_head_unwrapped = last_write_head + write_head_increment;
-                while (index_to_write < write_head_unwrapped)
-                {
-                    float t = (index_to_write - last_write_head) / write_head_increment;
-                    left_delay_line[wrap(index_to_write, DELAY_LINE_LENGTH)] +=
-                        lerp(0.0f, routings.delay_input[0][i] + patch.fb_gain * routings.delay_fb_input[0][i], t);
-                    right_delay_line[wrap(index_to_write, DELAY_LINE_LENGTH)] +=
-                        lerp(0.0f, routings.delay_input[1][i] + patch.fb_gain * routings.delay_fb_input[1][i], t);
-                    ++index_to_write;
-                }
-
-                float next_write_head_unwrapped = write_head_unwrapped + write_head_increment;
-                while (index_to_write < next_write_head_unwrapped)
-                {
-                    float t = (index_to_write - write_head_unwrapped) / write_head_increment;
-                    left_delay_line[wrap(index_to_write, DELAY_LINE_LENGTH)] =
-                        lerp(routings.delay_input[0][i] + patch.fb_gain * routings.delay_fb_input[0][i], 0.0f, t);
-                    right_delay_line[wrap(index_to_write, DELAY_LINE_LENGTH)] =
-                        lerp(routings.delay_input[1][i] + patch.fb_gain * routings.delay_fb_input[1][i], 0.0f, t);
-                    ++index_to_write;
-                }
-            }
-
-            last_write_head = write_head;
-            write_head += write_head_increment;
-            if (write_head >= DELAY_LINE_LENGTH) write_head -= DELAY_LINE_LENGTH;
-
-            last_delay_time = patch.delay_time;
-        }
+        tape_delay_process(audio_data, routings, patch);
 
         pv_process(audio_data, &routings, powf(2.0f, patch.pitch));
         audio_data->new_data = false;
