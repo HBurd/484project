@@ -38,7 +38,7 @@ void midi_loop()
                     current_patch.fb_gain = event->data.control.value / 127.0f;
                     break;
                 case MidiCCIndex::DelayTime:
-                    current_patch.delay_time = event->data.control.value / 127.0f;
+                    current_patch.delay_time = (event->data.control.value + 1.0f) / 128.0f;
                     break;
                 //case MidiCCIndex::ModFreq:
                 //    break;

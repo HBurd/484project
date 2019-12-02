@@ -111,7 +111,7 @@ static void pv_process(AudioData *audio_data, Routings *routings, float pitch_ra
                 kiss_fft(kiss_bwd_cfg, freqs[c], fft_buf[c]);
             }
 
-            float FFT_SCALE_FACTOR = (0.5f / PV_BLOCK_SIZE) * (hop_size * pitch_ratio / PV_BLOCK_SIZE);
+            float FFT_SCALE_FACTOR = (2.0f / PV_BLOCK_SIZE) * (hop_size * pitch_ratio / PV_BLOCK_SIZE);
 
             // TODO: no more channel hard-coding
             for (uint32_t i = 0; i < PV_BLOCK_SIZE - block_start; ++i)
