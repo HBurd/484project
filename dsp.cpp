@@ -111,6 +111,8 @@ static void pv_process(AudioData *audio_data, Routings *routings, float pitch_ra
                 kiss_fft(kiss_bwd_cfg, freqs[c], fft_buf[c]);
             }
 
+            float FFT_SCALE_FACTOR = (0.5f / PV_BLOCK_SIZE) * (hop_size * pitch_ratio / PV_BLOCK_SIZE);
+
             // TODO: no more channel hard-coding
             for (uint32_t i = 0; i < PV_BLOCK_SIZE - block_start; ++i)
             {
@@ -124,18 +126,18 @@ static void pv_process(AudioData *audio_data, Routings *routings, float pitch_ra
                 {
                     float han_sampled = lerp(hanw[sample_idx], hanw[next_sample_idx], t);
                     routings->left_pv_output[i + block_start] +=
-                        han_sampled * lerp(fft_buf[0][sample_idx].r, fft_buf[0][next_sample_idx].r, t) / PV_BLOCK_SIZE;
+                        han_sampled * lerp(fft_buf[0][sample_idx].r, fft_buf[0][next_sample_idx].r, t) * FFT_SCALE_FACTOR;
                     routings->right_pv_output[i + block_start] +=
-                        han_sampled * lerp(fft_buf[1][sample_idx].r, fft_buf[1][next_sample_idx].r, t) / PV_BLOCK_SIZE;
+                        han_sampled * lerp(fft_buf[1][sample_idx].r, fft_buf[1][next_sample_idx].r, t) * FFT_SCALE_FACTOR;
                 }
                 else if (next_sample_idx == PV_BLOCK_SIZE)
                 {
                     // Lerp towards zero at the end of the block
                     float han_sampled = lerp(hanw[sample_idx], hanw[next_sample_idx], t);
                     routings->left_pv_output[i + block_start] +=
-                        hanw[sample_idx] * lerp(fft_buf[0][sample_idx].r, 0.0f, t) / PV_BLOCK_SIZE;
+                        hanw[sample_idx] * lerp(fft_buf[0][sample_idx].r, 0.0f, t) * FFT_SCALE_FACTOR;
                     routings->right_pv_output[i + block_start] +=
-                        hanw[sample_idx] * lerp(fft_buf[1][sample_idx].r, 0.0f, t) / PV_BLOCK_SIZE;
+                        hanw[sample_idx] * lerp(fft_buf[1][sample_idx].r, 0.0f, t) * FFT_SCALE_FACTOR;
                 }
             }
 
@@ -154,14 +156,14 @@ static void pv_process(AudioData *audio_data, Routings *routings, float pitch_ra
                     {
                         float han_sampled = lerp(hanw[sample_idx], hanw[next_sample_idx], t);
                         partial_windows[c][i - PV_BLOCK_SIZE + block_start] += 
-                            han_sampled * lerp(fft_buf[c][sample_idx].r, fft_buf[c][next_sample_idx].r, t) / PV_BLOCK_SIZE;
+                            han_sampled * lerp(fft_buf[c][sample_idx].r, fft_buf[c][next_sample_idx].r, t) * FFT_SCALE_FACTOR;
                     }
                     else if (next_sample_idx == PV_BLOCK_SIZE)
                     {
                         // Lerp towards zero at the end of the block
                         float han_sampled = lerp(hanw[sample_idx], hanw[next_sample_idx], t);
                         partial_windows[c][i - PV_BLOCK_SIZE + block_start] += 
-                            han_sampled * lerp(fft_buf[c][sample_idx].r, 0.0f, t) / PV_BLOCK_SIZE;
+                            han_sampled * lerp(fft_buf[c][sample_idx].r, 0.0f, t) * FFT_SCALE_FACTOR;
                     }
                 }
             }
