@@ -25,6 +25,7 @@ void midi_loop()
         snd_seq_event_input(handle, &event);
         if (event && event->type == SND_SEQ_EVENT_CONTROLLER)
         {
+            std::lock_guard<std::mutex> lock(patch_mutex);
             switch (event->data.control.param)
             {
                 case MidiCCIndex::DryGain:
@@ -38,6 +39,18 @@ void midi_loop()
                     break;
                 case MidiCCIndex::DelayTime:
                     current_patch.delay_time = event->data.control.value / 127.0f;
+                    break;
+                //case MidiCCIndex::ModFreq:
+                //    break;
+                //case MidiCCIndex::ModInt:
+                //    break;
+                //case MidiCCIndex::ModSrc:
+                //    break;
+                case MidiCCIndex::Algorithm:
+                    current_patch.algorithm = (RoutingAlgorithm)event->data.control.value;
+                    break;
+                case MidiCCIndex::Pitch:
+                    current_patch.pitch = ((float)event->data.control.value - 63.5f) / 63.5f;
                     break;
             }
         }

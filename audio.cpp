@@ -9,7 +9,7 @@ static int jack_process_callback(jack_nframes_t nframes, void *arg)
     AudioData *jack_data = (AudioData*)arg;
 
     // Check if the client is done processing
-    assert(!jack_data->new_data);
+    //assert(!jack_data->new_data);
 
     assert(nframes == jack_data->buf_size);
 

@@ -11,6 +11,8 @@ namespace MidiCCIndex
         ModFreq,
         ModInt,
         ModSrc,
+        Algorithm,
+        Pitch
     };
 }
 
