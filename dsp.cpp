@@ -24,30 +24,24 @@ uint32_t current_delay_line_length = 44100;
 // TODO: Right now it's just luck that this happens to be the same length as a jack frame
 constexpr uint32_t BUFFER_LENGTH = 1024;
 
-sample_t left_output_buffer[BUFFER_LENGTH];
-sample_t right_output_buffer[BUFFER_LENGTH];
 
-sample_t left_input_buffer[BUFFER_LENGTH];
-sample_t right_input_buffer[BUFFER_LENGTH];
-
-sample_t delay_fb_input[NUM_CHANNELS][BUFFER_LENGTH];
+sample_t delay_output_buf[NUM_CHANNELS][BUFFER_LENGTH];
 
 constexpr uint32_t PV_BLOCK_SIZE = 1024;
 constexpr uint32_t PV_INPUT_BUF_LEN = 2 * PV_BLOCK_SIZE;
 uint32_t hop_size = PV_BLOCK_SIZE / 4;
 
-sample_t hanw[PV_BLOCK_SIZE];
+sample_t pv_output_buf[NUM_CHANNELS][BUFFER_LENGTH];
 
-sample_t left_pv_input[PV_INPUT_BUF_LEN];
-sample_t right_pv_input[PV_INPUT_BUF_LEN];
+
+sample_t hanw[PV_BLOCK_SIZE];
 
 struct Routings
 {
-    sample_t *left_pv_output;
-    sample_t *right_pv_output;
-
-    sample_t *left_delay_output;
-    sample_t *right_delay_output;
+    sample_t *pv_input[2];
+    sample_t *delay_input[2];
+    sample_t *delay_fb_input[2];
+    sample_t *output[2];
 };
 
 kiss_fft_cfg kiss_fwd_cfg;
@@ -55,6 +49,9 @@ kiss_fft_cfg kiss_bwd_cfg;
 
 static void pv_process(AudioData *audio_data, Routings *routings, float pitch_ratio)
 {
+
+    static sample_t pv_input_buf[NUM_CHANNELS][PV_INPUT_BUF_LEN];
+
     // We have to copy our fft input into a new buffer with imaginary values (dumb)
     // TODO: I think KISS FFT provides a real-input FFT in the tools
     static kiss_fft_cpx fft_buf[NUM_CHANNELS][PV_BLOCK_SIZE];
@@ -67,32 +64,38 @@ static void pv_process(AudioData *audio_data, Routings *routings, float pitch_ra
     static float last_phase[NUM_CHANNELS][PV_BLOCK_SIZE];
     static float adjusted_phase[NUM_CHANNELS][PV_BLOCK_SIZE];
 
-    if (routings->left_pv_output && routings->right_pv_output)
+    if (routings->pv_input[0] && routings->pv_input[1])
     {
-        // Copy remaining partial windows into output buffer (to be overlapped)
-        memcpy(routings->left_pv_output, partial_windows[0], BUFFER_LENGTH * sizeof(sample_t));
-        memcpy(routings->right_pv_output, partial_windows[1], BUFFER_LENGTH * sizeof(sample_t));
-        memset(partial_windows[0], 0, PV_BLOCK_SIZE * sizeof(sample_t));
-        memset(partial_windows[1], 0, PV_BLOCK_SIZE * sizeof(sample_t));
+        for (uint32_t c = 0; c < NUM_CHANNELS; ++c)
+        {
+            // Make room for the next block of data to get written in
+            memcpy(pv_input_buf[c], pv_input_buf[c] + BUFFER_LENGTH, BUFFER_LENGTH * sizeof(sample_t));
+
+            // Copy in the next block of data
+            memcpy(pv_input_buf[c] + BUFFER_LENGTH, routings->pv_input[c], BUFFER_LENGTH * sizeof(sample_t));
+
+            // Copy remaining partial windows into output buffer (to be overlapped)
+            memcpy(pv_output_buf[c], partial_windows[c], BUFFER_LENGTH * sizeof(sample_t));
+            memset(partial_windows[c], 0, PV_BLOCK_SIZE * sizeof(sample_t));
+        }
 
         for (uint32_t h = 0; h < PV_BLOCK_SIZE / hop_size; ++h)
         {
             uint32_t block_start = h * hop_size;
 
-            // Copy into buffer to perform fft
-            for (uint32_t i = 0; i < PV_BLOCK_SIZE; ++i)
-            {
-                fft_buf[0][i].r = hanw[i] * left_pv_input[block_start + i];
-                fft_buf[0][i].i = 0.0f;
-
-                fft_buf[1][i].r = hanw[i] * right_pv_input[block_start + i];
-                fft_buf[1][i].i = 0.0f;
-            }
-
             for (uint32_t c = 0; c < NUM_CHANNELS; ++c)
             {
+                // Copy into buffer to perform fft
+                // TODO: Circular shift
+                for (uint32_t i = 0; i < PV_BLOCK_SIZE; ++i)
+                {
+                    fft_buf[c][i].r = hanw[i] * pv_input_buf[c][block_start + i];
+                    fft_buf[c][i].i = 0.0f;
+                }
+
                 kiss_fft(kiss_fwd_cfg, fft_buf[c], freqs[c]);
                 // TODO: We don't actually need to deal with anything past the Nyquist freq
+                // TODO: LP filter
                 for (uint32_t k = 0; k < PV_BLOCK_SIZE; k++)
                 {
                     float bin_phase = cplx_angle(freqs[c][k].r, freqs[c][k].i);
@@ -109,38 +112,30 @@ static void pv_process(AudioData *audio_data, Routings *routings, float pitch_ra
                     adjusted_phase[c][k] = new_phase;
                 }
                 kiss_fft(kiss_bwd_cfg, freqs[c], fft_buf[c]);
-            }
 
-            // TODO: no more channel hard-coding
-            for (uint32_t i = 0; i < PV_BLOCK_SIZE - block_start; ++i)
-            {
-                // We're resampling in here
-                float sample_pos = i * pitch_ratio;
-                uint32_t sample_idx = (uint32_t)sample_pos;
-                uint32_t next_sample_idx = sample_idx + 1;
-                float t = sample_pos - sample_idx;
-
-                if (next_sample_idx < PV_BLOCK_SIZE)
+                for (uint32_t i = 0; i < PV_BLOCK_SIZE - block_start; ++i)
                 {
-                    float han_sampled = lerp(hanw[sample_idx], hanw[next_sample_idx], t);
-                    routings->left_pv_output[i + block_start] +=
-                        han_sampled * lerp(fft_buf[0][sample_idx].r, fft_buf[0][next_sample_idx].r, t) / PV_BLOCK_SIZE;
-                    routings->right_pv_output[i + block_start] +=
-                        han_sampled * lerp(fft_buf[1][sample_idx].r, fft_buf[1][next_sample_idx].r, t) / PV_BLOCK_SIZE;
-                }
-                else if (next_sample_idx == PV_BLOCK_SIZE)
-                {
-                    // Lerp towards zero at the end of the block
-                    float han_sampled = lerp(hanw[sample_idx], hanw[next_sample_idx], t);
-                    routings->left_pv_output[i + block_start] +=
-                        hanw[sample_idx] * lerp(fft_buf[0][sample_idx].r, 0.0f, t) / PV_BLOCK_SIZE;
-                    routings->right_pv_output[i + block_start] +=
-                        hanw[sample_idx] * lerp(fft_buf[1][sample_idx].r, 0.0f, t) / PV_BLOCK_SIZE;
-                }
-            }
+                    // We're resampling in here
+                    float sample_pos = i * pitch_ratio;
+                    uint32_t sample_idx = (uint32_t)sample_pos;
+                    uint32_t next_sample_idx = sample_idx + 1;
+                    float t = sample_pos - sample_idx;
 
-            for (uint32_t c = 0; c < NUM_CHANNELS; ++c)
-            {
+                    if (next_sample_idx < PV_BLOCK_SIZE)
+                    {
+                        float han_sampled = lerp(hanw[sample_idx], hanw[next_sample_idx], t);
+                        pv_output_buf[c][i + block_start] +=
+                            han_sampled * lerp(fft_buf[c][sample_idx].r, fft_buf[c][next_sample_idx].r, t) / PV_BLOCK_SIZE;
+                    }
+                    else if (next_sample_idx == PV_BLOCK_SIZE)
+                    {
+                        // Lerp towards zero at the end of the block
+                        float han_sampled = lerp(hanw[sample_idx], hanw[next_sample_idx], t);
+                        pv_output_buf[c][i + block_start] +=
+                            hanw[sample_idx] * lerp(fft_buf[c][sample_idx].r, 0.0f, t) / PV_BLOCK_SIZE;
+                    }
+                }
+
                 for (uint32_t i = PV_BLOCK_SIZE - block_start; i < 2 * PV_BLOCK_SIZE; ++i)
                 {
                     // We're resampling in here
@@ -166,10 +161,6 @@ static void pv_process(AudioData *audio_data, Routings *routings, float pitch_ra
                 }
             }
         }
-
-        // Make room for the next block of data to get written in
-        memcpy(left_pv_input, left_pv_input + BUFFER_LENGTH, BUFFER_LENGTH * sizeof(sample_t));
-        memcpy(right_pv_input, right_pv_input + BUFFER_LENGTH, BUFFER_LENGTH * sizeof(sample_t));
     }
 }
 
@@ -212,8 +203,6 @@ static void process_audio_frame(AudioData *audio_data)
     //last_delay_samples = current_patch.delay_samples;
     
     Routings routings;
-    routings.left_delay_output = audio_data->left_output_buffer;
-    routings.right_delay_output = audio_data->right_output_buffer;
     
     float write_head = 0.0f;
     float last_write_head = 0.0f;
@@ -238,18 +227,26 @@ static void process_audio_frame(AudioData *audio_data)
         switch (patch.algorithm)
         {
             case RoutingAlgorithm::FF_PV:
-                routings.left_delay_output = left_pv_input + PV_INPUT_BUF_LEN - BUFFER_LENGTH;
-                routings.right_delay_output = right_pv_input + PV_INPUT_BUF_LEN - BUFFER_LENGTH;
-                routings.left_pv_output = audio_data->left_output_buffer;
-                routings.right_pv_output = audio_data->right_output_buffer;
+                routings.delay_input[0] = audio_data->left_input_buffer;
+                routings.delay_input[1] = audio_data->right_input_buffer;
+                routings.delay_fb_input[0] = delay_output_buf[0];
+                routings.delay_fb_input[1] = delay_output_buf[1];
+                routings.pv_input[0] = delay_output_buf[0];
+                routings.pv_input[1] = delay_output_buf[1];
+                audio_data->left_output_buffer = pv_output_buf[0];
+                audio_data->right_output_buffer = pv_output_buf[1];
                 break;
             case RoutingAlgorithm::FB_PV: // not implemented yet
             case RoutingAlgorithm::NO_PV:
             default:
-                routings.left_delay_output = audio_data->left_output_buffer;
-                routings.right_delay_output = audio_data->right_output_buffer;
-                routings.left_pv_output = nullptr;
-                routings.right_pv_output = nullptr;
+                routings.delay_input[0] = audio_data->left_input_buffer;
+                routings.delay_input[1] = audio_data->right_input_buffer;
+                routings.delay_fb_input[0] = delay_output_buf[0];
+                routings.delay_fb_input[1] = delay_output_buf[1];
+                routings.pv_input[0] = nullptr;
+                routings.pv_input[1] = nullptr;
+                audio_data->left_output_buffer = delay_output_buf[0];
+                audio_data->right_output_buffer = delay_output_buf[1];
                 break;
         }
 
@@ -280,15 +277,13 @@ static void process_audio_frame(AudioData *audio_data)
 
             // write output sample
             {
-                routings.left_delay_output[i] = 
-                    patch.dry_gain * audio_data->left_input_buffer[i]
-                    + patch.ff_gain * left_ff_sample;
-                routings.right_delay_output[i] =
-                    patch.dry_gain * audio_data->right_input_buffer[i]
-                    + patch.ff_gain * right_ff_sample;
+                delay_output_buf[0][i] = left_ff_sample;
+                delay_output_buf[1][i] = right_ff_sample;
             }
 
             // write to delay_line
+            // LOSSLESS DELAY COMMENTED OUT
+            /*
             {
                 uint32_t index_to_write = ceilf(last_write_head);
                 float write_head_unwrapped = last_write_head + write_head_increment;
@@ -296,9 +291,9 @@ static void process_audio_frame(AudioData *audio_data)
                 {
                     float t = (index_to_write - last_write_head) / write_head_increment;
                     left_delay_line[wrap(index_to_write, DELAY_LINE_LENGTH)] +=
-                        lerp(0.0f, audio_data->left_input_buffer[i], t);
+                        lerp(0.0f, routings.delay_input[0][i], t);
                     right_delay_line[wrap(index_to_write, DELAY_LINE_LENGTH)] +=
-                        lerp(0.0f, audio_data->right_input_buffer[i], t);
+                        lerp(0.0f, routings.delay_input[1][i], t);
                     ++index_to_write;
                 }
 
@@ -308,10 +303,35 @@ static void process_audio_frame(AudioData *audio_data)
                     float t = (index_to_write - write_head_unwrapped) / write_head_increment;
                     left_delay_line[wrap(index_to_write, DELAY_LINE_LENGTH)] =
                         patch.fb_gain * left_delay_line[wrap(index_to_write, DELAY_LINE_LENGTH)]
-                        + lerp(audio_data->left_input_buffer[i], 0.0f, t);
+                        + lerp(routings.delay_input[0][i], 0.0f, t);
                     right_delay_line[wrap(index_to_write, DELAY_LINE_LENGTH)] =
                         patch.fb_gain * right_delay_line[wrap(index_to_write, DELAY_LINE_LENGTH)]
-                        + lerp(audio_data->right_input_buffer[i], 0.0f, t);
+                        + lerp(routings.delay_input[1][i], 0.0f, t);
+                    ++index_to_write;
+                }
+            }
+            */
+            {
+                uint32_t index_to_write = ceilf(last_write_head);
+                float write_head_unwrapped = last_write_head + write_head_increment;
+                while (index_to_write < write_head_unwrapped)
+                {
+                    float t = (index_to_write - last_write_head) / write_head_increment;
+                    left_delay_line[wrap(index_to_write, DELAY_LINE_LENGTH)] +=
+                        lerp(0.0f, routings.delay_input[0][i] + patch.fb_gain * routings.delay_fb_input[0][i], t);
+                    right_delay_line[wrap(index_to_write, DELAY_LINE_LENGTH)] +=
+                        lerp(0.0f, routings.delay_input[1][i] + patch.fb_gain * routings.delay_fb_input[1][i], t);
+                    ++index_to_write;
+                }
+
+                float next_write_head_unwrapped = write_head_unwrapped + write_head_increment;
+                while (index_to_write < next_write_head_unwrapped)
+                {
+                    float t = (index_to_write - write_head_unwrapped) / write_head_increment;
+                    left_delay_line[wrap(index_to_write, DELAY_LINE_LENGTH)] =
+                        lerp(routings.delay_input[0][i] + patch.fb_gain * routings.delay_fb_input[0][i], 0.0f, t);
+                    right_delay_line[wrap(index_to_write, DELAY_LINE_LENGTH)] =
+                        lerp(routings.delay_input[1][i] + patch.fb_gain * routings.delay_fb_input[1][i], 0.0f, t);
                     ++index_to_write;
                 }
             }
@@ -339,6 +359,13 @@ void han_init(sample_t *hanw, uint32_t len)
 void dsp_init()
 {
     static AudioData audio_data;
+
+    // TODO: these are currently only used for the first call of processing function
+    static sample_t left_output_buffer[BUFFER_LENGTH];
+    static sample_t right_output_buffer[BUFFER_LENGTH];
+
+    static sample_t left_input_buffer[BUFFER_LENGTH];
+    static sample_t right_input_buffer[BUFFER_LENGTH];
 
     audio_data.buf_size = BUFFER_LENGTH;
     audio_data.left_output_buffer = left_output_buffer;
