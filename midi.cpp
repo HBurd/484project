@@ -1,5 +1,6 @@
 #include "midi.h"
 #include <assert.h>
+#include <math.h>
 #include <alsa/asoundlib.h>
 
 #include <iostream>
@@ -25,32 +26,38 @@ void midi_loop()
         snd_seq_event_input(handle, &event);
         if (event && event->type == SND_SEQ_EVENT_CONTROLLER)
         {
+            float value_unsigned = event->data.control.value / 127.0f;
+            float value_signed = (event->data.control.value - 63.5f) / 63.5f;
             std::lock_guard<std::mutex> lock(patch_mutex);
             switch (event->data.control.param)
             {
                 case MidiCCIndex::DryGain:
-                    current_patch.dry_gain = event->data.control.value / 127.0f;
+                    current_patch.dry_gain = value_unsigned;
                     break;
                 case MidiCCIndex::FFGain:
-                    current_patch.ff_gain = event->data.control.value / 127.0f;
+                    current_patch.ff_gain = value_unsigned;
                     break;
                 case MidiCCIndex::FBGain:
-                    current_patch.fb_gain = event->data.control.value / 127.0f;
+                    current_patch.fb_gain = value_unsigned;
                     break;
                 case MidiCCIndex::DelayTime:
+                    // I think the linear scale is more fun to play with
                     current_patch.delay_time = (event->data.control.value + 1.0f) / 128.0f;
                     break;
-                //case MidiCCIndex::ModFreq:
-                //    break;
-                //case MidiCCIndex::ModInt:
-                //    break;
+                case MidiCCIndex::ModFreq:
+                    // centre is 1 Hz, range from 1/64 Hz to 64 Hz
+                    current_patch.delay_mod_freq = 2 * M_PI * powf(2.0f, 6.0f * value_signed);
+                    break;
+                case MidiCCIndex::ModInt:
+                    current_patch.delay_mod_amplitude = value_unsigned;
+                    break;
                 //case MidiCCIndex::ModSrc:
                 //    break;
                 case MidiCCIndex::Algorithm:
                     current_patch.algorithm = (RoutingAlgorithm)event->data.control.value;
                     break;
                 case MidiCCIndex::Pitch:
-                    current_patch.pitch = ((float)event->data.control.value - 63.5f) / 63.5f;
+                    current_patch.pitch = powf(2.0f, value_signed);
                     break;
             }
         }

@@ -36,13 +36,12 @@ struct Routings
     sample_t *pv_input[2] = {};
     sample_t *delay_input[2] = {};
     sample_t *delay_fb_input[2] = {};
-    sample_t *output[2] = {};
 };
 
 kiss_fft_cfg kiss_fwd_cfg;
 kiss_fft_cfg kiss_bwd_cfg;
 
-static void pv_process(AudioData *audio_data, Routings *routings, float pitch_ratio)
+static void pv_process(AudioData *audio_data, Routings routings, Patch patch)
 {
     constexpr uint32_t PV_INPUT_BUF_LEN = 2 * PV_BLOCK_SIZE;
     static sample_t pv_input_buf[NUM_CHANNELS][PV_INPUT_BUF_LEN];
@@ -59,7 +58,7 @@ static void pv_process(AudioData *audio_data, Routings *routings, float pitch_ra
     static float last_phase[NUM_CHANNELS][PV_BLOCK_SIZE];
     static float adjusted_phase[NUM_CHANNELS][PV_BLOCK_SIZE];
 
-    if (routings->pv_input[0] && routings->pv_input[1])
+    if (routings.pv_input[0] && routings.pv_input[1])
     {
         for (uint32_t c = 0; c < NUM_CHANNELS; ++c)
         {
@@ -67,7 +66,7 @@ static void pv_process(AudioData *audio_data, Routings *routings, float pitch_ra
             memcpy(pv_input_buf[c], pv_input_buf[c] + BUFFER_LENGTH, BUFFER_LENGTH * sizeof(sample_t));
 
             // Copy in the next block of data
-            memcpy(pv_input_buf[c] + BUFFER_LENGTH, routings->pv_input[c], BUFFER_LENGTH * sizeof(sample_t));
+            memcpy(pv_input_buf[c] + BUFFER_LENGTH, routings.pv_input[c], BUFFER_LENGTH * sizeof(sample_t));
 
             // Copy remaining partial windows into output buffer (to be overlapped)
             memcpy(pv_output_buf[c], partial_windows[c], BUFFER_LENGTH * sizeof(sample_t));
@@ -109,7 +108,7 @@ static void pv_process(AudioData *audio_data, Routings *routings, float pitch_ra
                     float phase_diff = bin_phase - target_phase;
                     float phase_increment = hop_size * bin_freq + princarg(phase_diff);
                     float instant_freq = phase_increment / hop_size;
-                    float new_phase = adjusted_phase[c][k] + instant_freq * hop_size * pitch_ratio;
+                    float new_phase = adjusted_phase[c][k] + instant_freq * hop_size * patch.pitch;
                     last_phase[c][k] = bin_phase;
                     cplx_polar_to_rect(&freqs[c][k].r, &freqs[c][k].i, bin_mag, new_phase);
                     adjusted_phase[c][k] = new_phase;
@@ -119,19 +118,17 @@ static void pv_process(AudioData *audio_data, Routings *routings, float pitch_ra
                 // Circular shift
                 for (uint32_t i = 0; i < PV_BLOCK_SIZE / 2; ++i)
                 {
-                    float FFT_SCALE_FACTOR = (2.0f * hop_size * pitch_ratio) / (PV_BLOCK_SIZE * PV_BLOCK_SIZE);
+                    float FFT_SCALE_FACTOR = (2.0f * hop_size * patch.pitch) / (PV_BLOCK_SIZE * PV_BLOCK_SIZE);
 
                     sample_t temp = fft_buf[c][i].r;
                     fft_buf[c][i].r = fft_buf[c][i + PV_BLOCK_SIZE / 2].r * FFT_SCALE_FACTOR;
                     fft_buf[c][i + PV_BLOCK_SIZE / 2].r = temp * FFT_SCALE_FACTOR;
                 }
 
-
-
                 for (uint32_t i = 0; i < PV_BLOCK_SIZE - block_start; ++i)
                 {
                     // We're resampling in here
-                    float sample_pos = i * pitch_ratio;
+                    float sample_pos = i * patch.pitch;
                     uint32_t sample_idx = (uint32_t)sample_pos;
                     uint32_t next_sample_idx = sample_idx + 1;
                     float t = sample_pos - sample_idx;
@@ -154,7 +151,7 @@ static void pv_process(AudioData *audio_data, Routings *routings, float pitch_ra
                 for (uint32_t i = PV_BLOCK_SIZE - block_start; i < 2 * PV_BLOCK_SIZE; ++i)
                 {
                     // We're resampling in here
-                    float sample_pos = i * pitch_ratio;
+                    float sample_pos = i * patch.pitch;
                     uint32_t sample_idx = (uint32_t)sample_pos;
                     uint32_t next_sample_idx = sample_idx + 1;
                     float t = sample_pos - sample_idx;
@@ -179,6 +176,17 @@ static void pv_process(AudioData *audio_data, Routings *routings, float pitch_ra
     }
 }
 
+float delay_modulate(Patch patch)
+{
+    static float t = 0.0f;
+    float output = sinf(t);
+
+    t += patch.delay_mod_freq / SAMPLE_RATE;
+    if(t >= 2 * M_PI) t = 0.0f;
+    return patch.delay_mod_amplitude * powf(2.0f, output);
+}
+
+
 static void tape_delay_process(AudioData *audio_data, Routings routings, Patch patch)
 {
     constexpr uint32_t DELAY_LINE_LENGTH = 44100;
@@ -198,6 +206,9 @@ static void tape_delay_process(AudioData *audio_data, Routings routings, Patch p
             float t = (float)i / BUFFER_LENGTH;
             current_delay_time = lerp(last_delay_time, patch.delay_time, t);
         }
+
+        // BE CAREFUL: delay_modulate uses a static variable for time, so do this once for both channels
+        current_delay_time *= delay_modulate(patch);
 
         float write_head_increment = current_delay_line_length / (current_delay_time * SAMPLE_RATE);
 
@@ -376,8 +387,19 @@ static void process_audio_frame(AudioData *audio_data)
         }
 
         tape_delay_process(audio_data, routings, patch);
+        pv_process(audio_data, routings, patch);
+        
+        // Now do dry/wet mixing in the output buffer
+        for (uint32_t i = 0; i < BUFFER_LENGTH; ++i)
+        {
+            audio_data->left_output_buffer[i] =
+                patch.ff_gain * audio_data->left_output_buffer[i]
+                + patch.dry_gain * audio_data->left_input_buffer[i];
+            audio_data->right_output_buffer[i] =
+                patch.ff_gain * audio_data->right_output_buffer[i]
+                + patch.dry_gain * audio_data->right_input_buffer[i];
+        }
 
-        pv_process(audio_data, &routings, powf(2.0f, patch.pitch));
         audio_data->new_data = false;
     }
 }

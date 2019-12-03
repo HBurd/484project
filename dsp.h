@@ -25,13 +25,15 @@ struct Patch
     float ff_gain = 0.0f;
     float dry_gain = 1.0f;
 
+    float delay_time = 0.5f;
+
     ModulationType delay_mod_type = ModulationType::Sine;
     float delay_mod_amplitude = 0.1f;
-    float delay_time = 0.5f;
+    float delay_mod_freq = 1.0f;        // in rad/s
 
     float pitch = 0.0f;
 
-    RoutingAlgorithm algorithm = RoutingAlgorithm::FF_PV;
+    RoutingAlgorithm algorithm = RoutingAlgorithm::NO_PV;
 };
 
 extern Patch current_patch;
