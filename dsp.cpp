@@ -82,11 +82,18 @@ static void pv_process(AudioData *audio_data, Routings *routings, float pitch_ra
             for (uint32_t c = 0; c < NUM_CHANNELS; ++c)
             {
                 // Copy into buffer to perform fft
-                // TODO: Circular shift
                 for (uint32_t i = 0; i < PV_BLOCK_SIZE; ++i)
                 {
                     fft_buf[c][i].r = hanw[i] * pv_input_buf[c][block_start + i];
                     fft_buf[c][i].i = 0.0f;
+                }
+
+                // Circular shift
+                for (uint32_t i = 0; i < PV_BLOCK_SIZE / 2; ++i)
+                {
+                    sample_t temp = fft_buf[c][i].r;
+                    fft_buf[c][i].r = fft_buf[c][i + PV_BLOCK_SIZE / 2].r;
+                    fft_buf[c][i + PV_BLOCK_SIZE / 2].r = temp;
                 }
 
                 kiss_fft(kiss_fwd_cfg, fft_buf[c], freqs[c]);
@@ -109,7 +116,17 @@ static void pv_process(AudioData *audio_data, Routings *routings, float pitch_ra
                 }
                 kiss_fft(kiss_bwd_cfg, freqs[c], fft_buf[c]);
 
-                float FFT_SCALE_FACTOR = (2.0f / PV_BLOCK_SIZE) * (hop_size * pitch_ratio / PV_BLOCK_SIZE);
+                // Circular shift
+                for (uint32_t i = 0; i < PV_BLOCK_SIZE / 2; ++i)
+                {
+                    float FFT_SCALE_FACTOR = (2.0f * hop_size * pitch_ratio) / (PV_BLOCK_SIZE * PV_BLOCK_SIZE);
+
+                    sample_t temp = fft_buf[c][i].r;
+                    fft_buf[c][i].r = fft_buf[c][i + PV_BLOCK_SIZE / 2].r * FFT_SCALE_FACTOR;
+                    fft_buf[c][i + PV_BLOCK_SIZE / 2].r = temp * FFT_SCALE_FACTOR;
+                }
+
+
 
                 for (uint32_t i = 0; i < PV_BLOCK_SIZE - block_start; ++i)
                 {
@@ -123,14 +140,14 @@ static void pv_process(AudioData *audio_data, Routings *routings, float pitch_ra
                     {
                         float han_sampled = lerp(hanw[sample_idx], hanw[next_sample_idx], t);
                         pv_output_buf[c][i + block_start] +=
-                            han_sampled * lerp(fft_buf[c][sample_idx].r, fft_buf[c][next_sample_idx].r, t) * FFT_SCALE_FACTOR;
+                            han_sampled * lerp(fft_buf[c][sample_idx].r, fft_buf[c][next_sample_idx].r, t);
                     }
                     else if (next_sample_idx == PV_BLOCK_SIZE)
                     {
                         // Lerp towards zero at the end of the block
                         float han_sampled = lerp(hanw[sample_idx], 0.0f, t);
                         pv_output_buf[c][i + block_start] +=
-                            han_sampled * lerp(fft_buf[c][sample_idx].r, 0.0f, t) * FFT_SCALE_FACTOR;
+                            han_sampled * lerp(fft_buf[c][sample_idx].r, 0.0f, t);
                     }
                 }
 
@@ -147,14 +164,14 @@ static void pv_process(AudioData *audio_data, Routings *routings, float pitch_ra
                     {
                         float han_sampled = lerp(hanw[sample_idx], hanw[next_sample_idx], t);
                         partial_windows[c][i - PV_BLOCK_SIZE + block_start] += 
-                            han_sampled * lerp(fft_buf[c][sample_idx].r, fft_buf[c][next_sample_idx].r, t) * FFT_SCALE_FACTOR;
+                            han_sampled * lerp(fft_buf[c][sample_idx].r, fft_buf[c][next_sample_idx].r, t);
                     }
                     else if (next_sample_idx == PV_BLOCK_SIZE)
                     {
                         // Lerp towards zero at the end of the block
                         float han_sampled = lerp(hanw[sample_idx], 0.0f, t);
                         partial_windows[c][i - PV_BLOCK_SIZE + block_start] += 
-                            han_sampled * lerp(fft_buf[c][sample_idx].r, 0.0f, t) * FFT_SCALE_FACTOR;
+                            han_sampled * lerp(fft_buf[c][sample_idx].r, 0.0f, t);
                     }
                 }
             }
@@ -336,6 +353,15 @@ static void process_audio_frame(AudioData *audio_data)
                 audio_data->right_output_buffer = pv_output_buf[1];
                 break;
             case RoutingAlgorithm::FB_PV: // not implemented yet
+                routings.delay_input[0] = audio_data->left_input_buffer;
+                routings.delay_input[1] = audio_data->right_input_buffer;
+                routings.delay_fb_input[0] = pv_output_buf[0];
+                routings.delay_fb_input[1] = pv_output_buf[1];
+                routings.pv_input[0] = delay_output_buf[0];
+                routings.pv_input[1] = delay_output_buf[1];
+                audio_data->left_output_buffer = pv_output_buf[0];
+                audio_data->right_output_buffer = pv_output_buf[1];
+                break;
             case RoutingAlgorithm::NO_PV:
             default:
                 routings.delay_input[0] = audio_data->left_input_buffer;
