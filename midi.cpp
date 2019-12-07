@@ -59,6 +59,10 @@ void midi_loop()
                 case MidiCCIndex::Pitch:
                     current_patch.pitch = powf(2.0f, value_signed);
                     break;
+                case MidiCCIndex::HopSize:
+                    // TODO: kind of a hack, only allows for power of 2 hop sizes
+                    current_patch.hop_factor = 1 << event->data.control.value;
+                    break;
             }
         }
     }

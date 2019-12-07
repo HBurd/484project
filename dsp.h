@@ -32,8 +32,9 @@ struct Patch
     float delay_mod_freq = 1.0f;        // in rad/s
 
     float pitch = 0.0f;
+    uint32_t hop_factor = 2;
 
-    RoutingAlgorithm algorithm = RoutingAlgorithm::NO_PV;
+    RoutingAlgorithm algorithm = RoutingAlgorithm::FF_PV;
 };
 
 extern Patch current_patch;

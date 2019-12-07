@@ -1,5 +1,6 @@
 #include "util.h"
 #include <math.h>
+#include <assert.h>
 
 uint32_t modulo(int32_t x, int32_t y)
 {
@@ -36,7 +37,11 @@ float cplx_mag(float r, float i)
 
 float princarg(float t)
 {
-    return fmodf(t + M_PI, 2 * M_PI) - M_PI;
+    float result = fmodf(t + M_PI, 2 * M_PI);
+    if (result < 0.0f) result += 2 * M_PI;
+    result -= M_PI;
+    assert((result >= -M_PI - 0.1f) && (result <= M_PI + 0.1f));
+    return result;
 }
 
 void cplx_polar_to_rect(float *r, float *i, float mag, float angle)

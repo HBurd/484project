@@ -24,7 +24,6 @@ constexpr uint32_t BUFFER_LENGTH = 1024;
 sample_t delay_output_buf[NUM_CHANNELS][BUFFER_LENGTH];
 
 constexpr uint32_t PV_BLOCK_SIZE = 1024;
-uint32_t hop_size = PV_BLOCK_SIZE / 4;
 
 sample_t pv_output_buf[NUM_CHANNELS][BUFFER_LENGTH];
 
@@ -57,6 +56,8 @@ static void pv_process(AudioData *audio_data, Routings routings, Patch patch)
 
     static float last_phase[NUM_CHANNELS][PV_BLOCK_SIZE];
     static float adjusted_phase[NUM_CHANNELS][PV_BLOCK_SIZE];
+
+    uint32_t hop_size = PV_BLOCK_SIZE / patch.hop_factor;
 
     if (routings.pv_input[0] && routings.pv_input[1])
     {
@@ -183,7 +184,7 @@ float delay_modulate(Patch patch)
 
     t += patch.delay_mod_freq / SAMPLE_RATE;
     if(t >= 2 * M_PI) t = 0.0f;
-    return patch.delay_mod_amplitude * powf(2.0f, output);
+    return powf(2.0f, output * patch.delay_mod_amplitude);
 }
 
 
