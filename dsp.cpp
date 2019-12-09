@@ -114,6 +114,17 @@ static void pv_process(AudioData *audio_data, Routings routings, Patch patch)
                     cplx_polar_to_rect(&freqs[c][k].r, &freqs[c][k].i, bin_mag, new_phase);
                     adjusted_phase[c][k] = new_phase;
                 }
+                if (patch.pitch > 1.0f)
+                {
+                    // we need to filter or else there will be aliasing, as we are downsampling
+                    float aa_cutoff = M_PI / patch.pitch; // because this freq will be multplied up to pi
+                    uint32_t cutoff_bin = aa_cutoff * PV_BLOCK_SIZE / (2 * M_PI);
+                    for (uint32_t k = cutoff_bin; k < PV_BLOCK_SIZE - cutoff_bin + 1 ; ++k)
+                    {
+                        freqs[c][k] = {};
+                    }
+                }
+
                 kiss_fft(kiss_bwd_cfg, freqs[c], fft_buf[c]);
 
                 // Circular shift
